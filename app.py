@@ -1,9 +1,38 @@
+import hmac
+from pathlib import Path
+from PIL import Image, ImageChops
 import streamlit as st
 import pandas as pd
 import mysql.connector
 from datetime import datetime, date
 from config import config
 from attendance_service import add_manual_checkin
+from streamlit.errors import StreamlitSecretNotFoundError
+
+LOGO_PATH = Path(__file__).with_name("DJO.png")
+
+
+@st.cache_data
+def get_cropped_logo():
+    with Image.open(LOGO_PATH) as source:
+        logo = source.convert("RGB")
+        bounds = ImageChops.difference(
+            logo,
+            Image.new("RGB", logo.size, "white"),
+        ).getbbox()
+        if bounds is None:
+            return logo
+
+        left, top, right, bottom = bounds
+        padding = 12
+        return logo.crop(
+            (
+                max(0, left - padding),
+                max(0, top - padding),
+                min(logo.width, right + padding),
+                min(logo.height, bottom + padding),
+            )
+        )
 
 
 # ------------------------------------------------------------
@@ -32,6 +61,7 @@ def get_employees_with_status(target_date):
             e.Prenom AS prenom,
             e.Matricule AS matricule,
             c.ChaineMontage AS chaine_actuelle,
+            MAX(CASE WHEN ec.Etat = 1 THEN ec.Affecter_Le END) AS heure_pointage,
             CASE 
                 WHEN MAX(CASE WHEN ec.Etat = 1 THEN 1 ELSE 0 END) = 1 THEN 'Oui'
                 ELSE 'Non' 
@@ -181,16 +211,86 @@ def render_manual_checkin(df, target_date, status_column, form_key):
             st.error(f"Erreur de base de données : {exc}")
 
 
+def require_login():
+    try:
+        credentials = st.secrets["auth"]
+        expected_username = credentials["username"]
+        expected_password = credentials["password"]
+    except (StreamlitSecretNotFoundError, KeyError):
+        st.error(
+            "Authentification non configurée. Ajoutez [auth], username et password "
+            "dans .streamlit/secrets.toml."
+        )
+        st.stop()
+
+    if not isinstance(expected_username, str) or not expected_username.strip():
+        st.error("Le nom d'utilisateur dans .streamlit/secrets.toml est invalide.")
+        st.stop()
+    if not isinstance(expected_password, str) or not expected_password:
+        st.error("Le mot de passe dans .streamlit/secrets.toml est invalide.")
+        st.stop()
+
+    if not st.session_state.get("authenticated", False):
+        _, login_column, _ = st.columns([1, 1.1, 1])
+        with login_column:
+            with st.container(border=True):
+                _, logo_column, _ = st.columns([1, 2, 1])
+                logo_column.image(get_cropped_logo(), use_container_width=True)
+                st.markdown(
+                    "<h2 style='text-align: center;'>Connexion</h2>", unsafe_allow_html=True
+                )
+
+                with st.form("login_form"):
+                    username = st.text_input(
+                        "Nom d'utilisateur",
+                        placeholder="Saisissez votre nom d'utilisateur",
+                    )
+                    password = st.text_input(
+                        "Mot de passe",
+                        type="password",
+                        placeholder="Saisissez votre mot de passe",
+                    )
+                    submitted = st.form_submit_button(
+                        "Se connecter",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                    col1, col2, col3 = st.columns([1, 4, 1])
+                    with col2:
+                        st.caption("Application réalisée par [DivaSoftware](https://diva-software.com).")
+
+        if submitted:
+            username_valid = hmac.compare_digest(
+                username.strip(),
+                expected_username.strip(),
+            )
+            password_valid = hmac.compare_digest(password, expected_password)
+            if username_valid and password_valid:
+                st.session_state["authenticated"] = True
+                st.session_state["username"] = expected_username.strip()
+                st.rerun()
+            st.error("Nom d'utilisateur ou mot de passe incorrect.")
+
+        st.stop()
+
+
 # ------------------------------------------------------------
 # STREAMLIT APP
 # ------------------------------------------------------------
 def main():
     st.set_page_config(page_title=config.PAGE_TITLE, page_icon=config.PAGE_ICON, layout="wide")
+    require_login()
     st.title(f"{config.PAGE_ICON} {config.PAGE_TITLE}")
     if st.session_state.pop("manual_checkin_success", False):
         st.success("Le pointage a été ajouté.")
 
+
     menu = ["📈 Dashboard", "📊 Employés", "📋 Chaînes de Montage"]
+    st.sidebar.image(get_cropped_logo(), use_container_width=True)
+    st.sidebar.markdown("**Djo · Gestion des présences**")
+    st.sidebar.caption("Espace de suivi de production")
+    st.sidebar.markdown("---")
+    st.sidebar.caption("MENU PRINCIPAL")
     choice = st.sidebar.radio("Navigation", menu)
 
     target_date = None
@@ -331,16 +431,19 @@ def main():
             display_cols = ["nom", "prenom"]
             if "matricule" in df.columns:
                 display_cols.append("matricule")
-            display_cols += ["chaine_actuelle", "Statut"]
+            display_cols += ["chaine_actuelle", "heure_pointage", "Statut"]
 
             df_display = df[display_cols]
             new_names = ["Nom", "Prénom"]
             if "matricule" in df.columns:
                 new_names.append("Matricule")
-            new_names += ["Chaîne actuelle", "Statut"]
+            new_names += ["Chaîne actuelle", "Heure pointage", "Statut"]
             df_display.columns = new_names
 
-            st.dataframe(df_display, width='stretch')
+            df_display["Heure pointage"] = df_display["Heure pointage"].apply(
+                lambda value: value.strftime("%H:%M:%S") if pd.notnull(value) else ""
+            )
+            st.dataframe(df_display, width="stretch", hide_index=True)
             st.caption(f"Affichage de {len(df)} employé(s) pour la date {target_date}")
             render_manual_checkin(
                 pointage_employees,
@@ -420,7 +523,7 @@ def main():
                         "heure_pointage": "Heure pointage",
                         "statut_recalcule": "Statut"
                     })
-                    st.dataframe(display_group, width='stretch')
+                    st.dataframe(display_group, width="stretch", hide_index=True)
 
             st.caption(f"Affichage de {len(df)} employé(s) pour la date {target_date}")
             render_manual_checkin(
@@ -431,8 +534,14 @@ def main():
             )
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("Version 0.8.0 – dashboard par période et pointage manuel")
-
+    st.sidebar.caption("Connecté · Session sécurisée")
+    st.sidebar.caption(f"Utilisateur : {st.session_state.get('username', '')}")
+    if st.sidebar.button("Se déconnecter", use_container_width=True):
+        st.session_state["authenticated"] = False
+        st.session_state.pop("username", None)
+        st.rerun()
+    st.sidebar.caption("Version 0.8.0")
+    st.sidebar.markdown("---")
 
 if __name__ == "__main__":
     main()
