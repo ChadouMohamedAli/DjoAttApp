@@ -15,7 +15,6 @@ def get_connection():
         database=config.DB_NAME,
         user=config.DB_USER,
         password=config.DB_PASSWORD,
-        charset=config.DB_CHARSET,
         autocommit=False
     )
 
@@ -228,24 +227,21 @@ def get_shift_schedule(target_date):
     """
 
     conn = get_connection()
-
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute(
-        query,
-        (
-            target_date,
-            target_date
-        )
-    )
-
-    rows = cursor.fetchall()
-
-    cursor.close()
-
-    conn.close()
-
-    return rows
+    try:
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(
+                query,
+                (
+                    target_date,
+                    target_date
+                )
+            )
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+    finally:
+        conn.close()
 
 
 # ==========================================================
@@ -277,7 +273,7 @@ def insert_attendance(values):
 
         LastChange,
 
-        SaisieLe,
+        Saisile,
 
         Saisipar
 
@@ -305,6 +301,81 @@ def insert_attendance(values):
     """
 
     return execute(query, values)
+
+
+def insert_manual_attendance(employee_id, target_date, shift_id, checkin_at):
+    """Insert a new manual attendance row without modifying existing rows."""
+    conn = get_connection()
+
+    try:
+        conn.start_transaction()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute(
+            """
+            SELECT IDChaineMontage
+            FROM employe
+            WHERE IDEmploye=%s AND Etat=1
+            FOR UPDATE
+            """,
+            (employee_id,)
+        )
+        employee = cursor.fetchone()
+        if employee is None:
+            raise ValueError("Employé introuvable ou inactif.")
+
+        cursor.execute(
+            """
+            SELECT IDEmployeChaine
+            FROM employechaine
+            WHERE IDEmploye=%s AND DATE(Date)=%s AND Etat=1
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (employee_id, target_date)
+        )
+        if cursor.fetchone() is not None:
+            raise ValueError("Cet employé a déjà un pointage présent pour aujourd'hui.")
+
+        cursor.execute(
+            """
+            INSERT INTO employechaine
+            (
+                IDEmploye,
+                `Date`,
+                IDPosteTravail,
+                IDChaineMontage,
+                IDPlageHoraire,
+                Affecter_Le,
+                IDService,
+                Etat,
+                CreateTime,
+                LastChange,
+                Saisile,
+                Saisipar
+            )
+            VALUES
+            (%s, %s, %s, %s, 0, %s, 0, 1,
+             CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, %s)
+            """,
+            (
+                employee_id,
+                target_date,
+                shift_id,
+                employee["IDChaineMontage"],
+                checkin_at,
+                "Web User",
+            )
+        )
+        conn.commit()
+        return cursor.rowcount
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
 
 
 def update_present(values):

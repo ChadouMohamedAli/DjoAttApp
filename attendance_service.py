@@ -1,14 +1,15 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from database import (
     get_employee_info,
     get_attendance,
     insert_attendance,
+    insert_manual_attendance,
     update_present,
     update_absent,
 )
 
-from shift_service import get_shift_id
+from shift_service import get_shift_from_datetime, get_shift_id
 
 
 # ==========================================================
@@ -112,6 +113,26 @@ def build_kpis(df):
 # ==========================================================
 # PRESENT
 # ==========================================================
+
+def add_manual_checkin(employee_id, target_date, checkin_time):
+    """Append a manual attendance row for an employee absent on the selected day."""
+    if target_date != date.today():
+        raise ValueError("Le pointage manuel est autorisé uniquement pour aujourd'hui.")
+
+    shift = get_shift_from_datetime(target_date, checkin_time)
+    if shift is None:
+        raise ValueError(
+            "Aucun poste de travail ne correspond à cette heure dans tpstravail."
+        )
+
+    checkin_at = datetime.combine(target_date, checkin_time)
+    return insert_manual_attendance(
+        employee_id,
+        target_date,
+        shift["IDPosteTravail"],
+        checkin_at,
+    )
+
 
 def mark_present(
         employee_id,

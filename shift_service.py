@@ -46,6 +46,10 @@ def _to_time(value):
     raise TypeError(f"Unsupported time type: {type(value)}")
 
 
+def _minutes(value):
+    return value.hour * 60 + value.minute
+
+
 # ==========================================================
 # SHIFT LOGIC
 # ==========================================================
@@ -94,6 +98,8 @@ def get_shift_from_datetime(target_date, current_time=None):
 
         start = _to_time(shift["H1"])
         end = _to_time(shift["H4"])
+        if start is None or end is None:
+            continue
 
         start_minutes = _minutes(start)
         end_minutes = _minutes(end)
@@ -109,6 +115,7 @@ def get_shift_from_datetime(target_date, current_time=None):
             if start_minutes <= current_minutes < end_minutes:
 
                 return {
+                    "IDTpsTravail": int(shift["IDTpsTravail"]),
                     "IDPosteTravail": int(shift["IDPosteTravail"]),
                     "H1": start,
                     "H4": end
@@ -128,14 +135,12 @@ def get_shift_from_datetime(target_date, current_time=None):
             ):
 
                 return {
+                    "IDTpsTravail": int(shift["IDTpsTravail"]),
                     "IDPosteTravail": int(shift["IDPosteTravail"]),
                     "H1": start,
                     "H4": end
                 }
 
-    print("Target Date:", target_date)
-    shifts = get_shift_schedule(target_date)
-    print("****", shifts)
     return None
 
 

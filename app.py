@@ -3,6 +3,7 @@ import pandas as pd
 import mysql.connector
 from datetime import datetime, date
 from config import config
+from attendance_service import add_manual_checkin
 
 
 # ------------------------------------------------------------
@@ -14,8 +15,8 @@ def get_connection():
         port=config.DB_PORT,
         database=config.DB_NAME,
         user=config.DB_USER,
-        password=config.DB_PASSWORD,
-        charset=config.DB_CHARSET
+        password=config.DB_PASSWORD
+
     )
 
 
@@ -24,7 +25,7 @@ def get_connection():
 # ------------------------------------------------------------
 def get_employees_with_status(target_date):
     conn = get_connection()
-    query = f"""
+    query = """
         SELECT 
             e.IDEmploye AS id,
             e.Nom AS nom,
@@ -32,20 +33,21 @@ def get_employees_with_status(target_date):
             e.Matricule AS matricule,
             c.ChaineMontage AS chaine_actuelle,
             CASE 
-                WHEN ec.IDEmploye IS NOT NULL THEN 'Oui' 
+                WHEN MAX(CASE WHEN ec.Etat = 1 THEN 1 ELSE 0 END) = 1 THEN 'Oui'
                 ELSE 'Non' 
             END AS a_tague
         FROM employe e
         LEFT JOIN chainemontage c ON e.IDChaineMontage = c.IDChaineMontage
         LEFT JOIN employechaine ec 
             ON e.IDEmploye = ec.IDEmploye 
-            AND DATE(ec.Date) = '{target_date}'
+            AND DATE(ec.Date) = %s
         WHERE e.Etat = 1
-        GROUP BY e.IDEmploye
+        GROUP BY e.IDEmploye, e.Nom, e.Prenom, e.Matricule, c.ChaineMontage
     """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
+    try:
+        return pd.read_sql(query, conn, params=(target_date,))
+    finally:
+        conn.close()
 
 
 def get_employees_with_line_status(target_date):
@@ -58,17 +60,18 @@ def get_employees_with_line_status(target_date):
       - un statut de base (Présent/Absent) basé sur la présence d'un tag ce jour
     """
     conn = get_connection()
-    query = f"""
+    query = """
         SELECT 
+            e.IDEmploye AS id,
             COALESCE(c.ChaineMontage, 'Non affecté') AS chaine_nom,
             COALESCE(g.Groupe, 'Sans groupe') AS groupe,
             e.Nom AS nom,
             e.Prenom AS prenom,
             e.Matricule AS matricule,
-            ec.IDPosteTravail AS poste_travail,
-            ec.Affecter_Le AS heure_pointage,
+            MAX(CASE WHEN ec.Etat = 1 THEN ec.IDPosteTravail END) AS poste_travail,
+            MAX(CASE WHEN ec.Etat = 1 THEN ec.Affecter_Le END) AS heure_pointage,
             CASE 
-                WHEN ec.IDEmploye IS NOT NULL THEN 'Présent' 
+                WHEN MAX(CASE WHEN ec.Etat = 1 THEN 1 ELSE 0 END) = 1 THEN 'Présent'
                 ELSE 'Absent' 
             END AS statut
         FROM employe e
@@ -76,13 +79,106 @@ def get_employees_with_line_status(target_date):
         LEFT JOIN groupechaine g ON c.IDGroupe = g.IDGroupe
         LEFT JOIN employechaine ec 
             ON e.IDEmploye = ec.IDEmploye 
-            AND DATE(ec.Date) = '{target_date}'
+            AND DATE(ec.Date) = %s
         WHERE e.Etat = 1
+        GROUP BY e.IDEmploye, c.ChaineMontage, g.Groupe, e.Nom, e.Prenom, e.Matricule
         ORDER BY c.ChaineMontage, e.Nom
     """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
+    try:
+        return pd.read_sql(query, conn, params=(target_date,))
+    finally:
+        conn.close()
+
+
+def get_active_employees():
+    conn = get_connection()
+    query = """
+        SELECT
+            e.IDEmploye AS id,
+            COALESCE(c.ChaineMontage, 'Non affecté') AS chaine_nom,
+            COALESCE(g.Groupe, 'Sans groupe') AS groupe
+        FROM employe e
+        LEFT JOIN chainemontage c ON e.IDChaineMontage = c.IDChaineMontage
+        LEFT JOIN groupechaine g ON c.IDGroupe = g.IDGroupe
+        WHERE e.Etat = 1
+        ORDER BY g.Groupe, c.ChaineMontage
+    """
+    try:
+        return pd.read_sql(query, conn)
+    finally:
+        conn.close()
+
+
+def get_attendance_for_period(start_date, end_date, employee_ids):
+    if not employee_ids:
+        return pd.DataFrame(
+            columns=["id", "date_pointage", "poste_travail", "etat"]
+        )
+
+    placeholders = ", ".join(["%s"] * len(employee_ids))
+    query = f"""
+        SELECT
+            IDEmploye AS id,
+            DATE(Date) AS date_pointage,
+            IDPosteTravail AS poste_travail,
+            Etat AS etat
+        FROM employechaine
+        WHERE Date >= %s
+            AND Date < DATE_ADD(%s, INTERVAL 1 DAY)
+            AND IDEmploye IN ({placeholders})
+    """
+    conn = get_connection()
+    try:
+        return pd.read_sql(
+            query,
+            conn,
+            params=(start_date, end_date, *employee_ids),
+        )
+    finally:
+        conn.close()
+
+
+def render_manual_checkin(df, target_date, status_column, form_key):
+    st.markdown("### Ajouter un pointage manuel")
+    if target_date != date.today():
+        st.info("Le pointage manuel est disponible uniquement pour aujourd'hui.")
+        return
+
+    absent = df[df[status_column].isin(["Non", "Absent"])].copy()
+    if absent.empty:
+        st.info("Aucun employé absent disponible pour le pointage.")
+        return
+
+    labels = {
+        int(row.id): (
+            f"{row.matricule} — {row.nom} {row.prenom} (ID {int(row.id)})"
+            if pd.notna(row.matricule)
+            else f"{row.nom} {row.prenom} (ID {int(row.id)})"
+        )
+        for row in absent.itertuples()
+    }
+
+    with st.form(form_key):
+        employee_id = st.selectbox(
+            "Employé absent",
+            options=list(labels),
+            format_func=lambda value: labels[value],
+        )
+        pointage_time = st.time_input(
+            "Heure de pointage",
+            value=datetime.now().time().replace(second=0, microsecond=0),
+        )
+        submitted = st.form_submit_button("Enregistrer le pointage")
+
+    if submitted:
+        try:
+            add_manual_checkin(employee_id, target_date, pointage_time)
+            st.session_state["manual_checkin_success"] = True
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+        except mysql.connector.Error as exc:
+            st.error(f"Erreur de base de données : {exc}")
 
 
 # ------------------------------------------------------------
@@ -91,19 +187,125 @@ def get_employees_with_line_status(target_date):
 def main():
     st.set_page_config(page_title=config.PAGE_TITLE, page_icon=config.PAGE_ICON, layout="wide")
     st.title(f"{config.PAGE_ICON} {config.PAGE_TITLE}")
+    if st.session_state.pop("manual_checkin_success", False):
+        st.success("Le pointage a été ajouté.")
 
-    menu = ["📊 Employés", "📋 Chaînes de Montage"]
+    menu = ["📈 Dashboard", "📊 Employés", "📋 Chaînes de Montage"]
     choice = st.sidebar.radio("Navigation", menu)
 
-    target_date = st.sidebar.date_input("Date d'analyse", value=date.today()).isoformat()
+    target_date = None
+    if choice != "📈 Dashboard":
+        target_date = st.sidebar.date_input("Date d'analyse", value=date.today())
+
+    # ---------------------- Dashboard ----------------------
+    if choice == "📈 Dashboard":
+        st.subheader("📈 Dashboard de présence")
+        today = date.today()
+        start_date = st.sidebar.date_input(
+            "Du",
+            value=today,
+            key="dashboard_start_date",
+        )
+        end_date = st.sidebar.date_input(
+            "Au",
+            value=today,
+            key="dashboard_end_date",
+        )
+        employees = get_active_employees()
+
+        groups = ["Tous"] + sorted(employees["groupe"].dropna().unique().tolist())
+        selected_group = st.sidebar.selectbox("Groupe", groups)
+        if selected_group != "Tous":
+            employees = employees[employees["groupe"] == selected_group]
+
+        lines = ["Toutes"] + sorted(employees["chaine_nom"].dropna().unique().tolist())
+        selected_line = st.sidebar.selectbox("Chaîne de montage", lines)
+        if selected_line != "Toutes":
+            employees = employees[employees["chaine_nom"] == selected_line]
+
+        post_options = ["Tous", "P1 (6h-14h)", "P2 (14h-22h)", "P3 (22h-6h)"]
+        selected_post = st.sidebar.selectbox("Poste de travail", post_options)
+        post_ids = {"P1 (6h-14h)": 1, "P2 (14h-22h)": 2, "P3 (22h-6h)": 3}
+        selected_post_id = post_ids.get(selected_post)
+
+        if start_date > end_date:
+            st.warning("La date de début doit être antérieure ou égale à la date de fin.")
+        else:
+            st.caption(f"Indicateurs du {start_date} au {end_date}")
+            employee_ids = [int(employee_id) for employee_id in employees["id"].tolist()]
+            attendance = get_attendance_for_period(
+                start_date,
+                end_date,
+                employee_ids,
+            )
+
+            days_count = (end_date - start_date).days + 1
+            total_employee_days = len(employee_ids) * days_count
+            present_records = attendance[attendance["etat"] == 1].copy()
+            if selected_post_id is not None:
+                present_records = present_records[
+                    present_records["poste_travail"] == selected_post_id
+                ]
+            present_records = present_records.drop_duplicates(
+                subset=["id", "date_pointage"]
+            )
+            present = len(present_records)
+            absent = total_employee_days - present
+            attendance_rate = (
+                round(present / total_employee_days * 100, 1)
+                if total_employee_days
+                else 0
+            )
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Effectif (employé-jours)", total_employee_days)
+            col2.metric("Présences", present)
+            col3.metric("Absences", absent)
+            col4.metric("Taux de présence", f"{attendance_rate}%")
+            st.caption(
+                f"{len(employee_ids)} employé(s) actif(s) sur {days_count} jour(s)"
+            )
+
+            if employees.empty:
+                st.info("Aucun employé ne correspond aux filtres sélectionnés.")
+            else:
+                st.markdown("### Présence par chaîne de montage")
+                employee_counts = employees.groupby("chaine_nom")["id"].nunique()
+                present_by_line = (
+                    present_records.merge(
+                        employees[["id", "chaine_nom"]],
+                        on="id",
+                        how="inner",
+                    )
+                    .groupby("chaine_nom")
+                    .size()
+                )
+                present_by_line = present_by_line.reindex(
+                    employee_counts.index,
+                    fill_value=0,
+                )
+                line_summary = pd.DataFrame(
+                    {
+                        "Présences": present_by_line,
+                        "Absences": employee_counts * days_count - present_by_line,
+                    }
+                ).fillna(0).astype(int).sort_index()
+                st.bar_chart(line_summary)
+
+        st.markdown("### Rapports")
+        download_col1, download_col2 = st.columns(2)
+        download_col1.button("Télécharger le rapport CSV", disabled=True, use_container_width=True)
+        download_col2.button("Télécharger le rapport PDF", disabled=True, use_container_width=True)
+        st.caption("Le téléchargement des rapports sera disponible prochainement.")
 
     # ---------------------- Employés view ----------------------
-    if choice == "📊 Employés":
+    elif choice == "📊 Employés":
         st.subheader("👥 État des employés")
         df = get_employees_with_status(target_date)
         if df.empty:
             st.info("Aucun employé trouvé.")
         else:
+            pointage_employees = df.copy()
             st.sidebar.markdown("### Filtres Employés")
             name_filter = st.sidebar.text_input("Rechercher par Nom/Prénom", "")
             if name_filter:
@@ -140,6 +342,12 @@ def main():
 
             st.dataframe(df_display, width='stretch')
             st.caption(f"Affichage de {len(df)} employé(s) pour la date {target_date}")
+            render_manual_checkin(
+                pointage_employees,
+                target_date,
+                "a_tague",
+                "manual_checkin_employees",
+            )
 
     # ---------------------- Chaînes view (BLOCKS) ----------------------
     elif choice == "📋 Chaînes de Montage":
@@ -168,6 +376,8 @@ def main():
             if chain_search:
                 df = df[df["chaine_nom"].str.contains(chain_search, case=False, na=False)]
 
+            pointage_employees = df.copy()
+
             # --- Recalcul du statut en fonction du poste sélectionné ---
             if selected_poste_id is not None:
                 # Nouveau statut : Présent seulement si le tag du jour a le bon IDPosteTravail
@@ -180,6 +390,10 @@ def main():
             else:
                 # Si aucun poste sélectionné, on garde le statut original (Présent si un tag existe)
                 df["statut_recalcule"] = df["statut"]
+
+            status_filter = st.sidebar.selectbox("Statut", ["Tous", "Présent", "Absent"])
+            if status_filter != "Tous":
+                df = df[df["statut_recalcule"] == status_filter]
 
             # Groupement par chaîne
             grouped = df.groupby("chaine_nom")
@@ -209,9 +423,15 @@ def main():
                     st.dataframe(display_group, width='stretch')
 
             st.caption(f"Affichage de {len(df)} employé(s) pour la date {target_date}")
+            render_manual_checkin(
+                pointage_employees,
+                target_date,
+                "statut",
+                "manual_checkin_lines",
+            )
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("Version 0.7.0 – filtre poste avec statut conditionnel")
+    st.sidebar.caption("Version 0.8.0 – dashboard par période et pointage manuel")
 
 
 if __name__ == "__main__":
