@@ -288,7 +288,6 @@ def main():
     menu = ["📈 Dashboard", "📊 Employés", "📋 Chaînes de Montage"]
     st.sidebar.image(get_cropped_logo(), use_container_width=True)
     st.sidebar.markdown("**Djo · Gestion des présences**")
-    st.sidebar.caption("Espace de suivi de production")
     st.sidebar.markdown("---")
     st.sidebar.caption("MENU PRINCIPAL")
     choice = st.sidebar.radio("Navigation", menu)
@@ -504,7 +503,7 @@ def main():
                 total = len(group)
                 # Compter les présents selon le statut recalculé
                 present = group[group["statut_recalcule"] == "Présent"].shape[0]
-                with st.expander(f"🏭 {chaine} — {total} employé(s), {present} présent(s)", expanded=True):
+                with st.expander(f"🏭 {chaine} — {total} employé(s), {present} présent(s)", expanded=False):
                     # Préparation du tableau : afficher le matricule, l'heure de pointage et le statut recalcule
                     display_group = group[["nom", "prenom", "matricule", "heure_pointage", "statut_recalcule"]].copy()
                     # Remplacer le statut par des émojis
@@ -536,12 +535,12 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.caption("Connecté · Session sécurisée")
     st.sidebar.caption(f"Utilisateur : {st.session_state.get('username', '')}")
+    st.sidebar.caption("Version 0.8.0")
     if st.sidebar.button("Se déconnecter", use_container_width=True):
         st.session_state["authenticated"] = False
         st.session_state.pop("username", None)
         st.rerun()
-    st.sidebar.caption("Version 0.8.0")
-    st.sidebar.markdown("---")
+
 
 if __name__ == "__main__":
     main()
